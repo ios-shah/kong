@@ -1,5 +1,10 @@
 local helpers = require "spec.helpers"
+local utils = require "kong.tools.utils"
 local cjson = require "cjson.safe"
+local _VERSION_TABLE = require "kong.meta" ._VERSION_TABLE
+local MAJOR = _VERSION_TABLE.major
+local MINOR = _VERSION_TABLE.minor
+local PATCH = _VERSION_TABLE.patch
 
 
 for _, strategy in helpers.each_strategy() do
@@ -58,6 +63,7 @@ for _, strategy in helpers.each_strategy() do
           for _, v in pairs(json.data) do
             if v.ip == "127.0.0.1" then
               assert.near(14 * 86400, v.ttl, 3)
+              assert.matches("^(%d+%.%d+)%.%d+", v.version)
 
               return true
             end
@@ -205,6 +211,232 @@ for _, strategy in helpers.each_strategy() do
     end)
   end)
 
+  describe("CP/DP version check works with #" .. strategy, function()
+    -- for these tests, we do not need a real DP, but rather use the fake DP
+    -- client so we can mock various values (e.g. node_version)
+
+    describe("cluster_version_check = strict (default), version must match exactly", function()
+      lazy_setup(function()
+        helpers.get_db_utils(strategy, {
+          "routes",
+          "services",
+          "clustering_data_planes",
+        }) -- runs migrations
+
+        assert(helpers.start_kong({
+          role = "control_plane",
+          cluster_cert = "spec/fixtures/kong_clustering.crt",
+          cluster_cert_key = "spec/fixtures/kong_clustering.key",
+          lua_ssl_trusted_certificate = "spec/fixtures/kong_clustering.crt",
+          database = strategy,
+          db_update_frequency = 3,
+          cluster_listen = "127.0.0.1:9005",
+          nginx_conf = "spec/fixtures/custom_nginx.template",
+        }))
+      end)
+
+      lazy_teardown(function()
+        helpers.stop_kong()
+      end)
+
+      it("CP and DP version matches", function()
+        local uuid = utils.uuid()
+
+        local res = assert(helpers.clustering_client({
+          host = "127.0.0.1",
+          port = 9005,
+          cert = "spec/fixtures/kong_clustering.crt",
+          cert_key = "spec/fixtures/kong_clustering.key",
+          node_id = uuid,
+        }))
+
+        assert.equals("reconfigure", res.type)
+        assert.is_table(res.config_table)
+
+        -- needs wait_until for C* convergence
+        helpers.wait_until(function()
+          local admin_client = helpers.admin_client()
+
+          res = assert(admin_client:get("/clustering/data-planes"))
+          local body = assert.res_status(200, res)
+
+          admin_client:close()
+          local json = cjson.decode(body)
+
+          for _, v in pairs(json.data) do
+            if v.id == uuid then
+              assert.equal(tostring(_VERSION_TABLE), v.version)
+              return true
+            end
+          end
+        end, 5)
+      end)
+
+      it("CP and DP minor version mismatches, sync is blocked", function()
+        local uuid = utils.uuid()
+        local version = string.format("%d.%d.%d", MAJOR, MINOR, PATCH + 1)
+
+        local res = assert(helpers.clustering_client({
+          host = "127.0.0.1",
+          port = 9005,
+          cert = "spec/fixtures/kong_clustering.crt",
+          cert_key = "spec/fixtures/kong_clustering.key",
+          node_version = version,
+          node_id = uuid,
+        }))
+
+        -- no config table, just PONG
+        assert.equals("PONG", res)
+
+        -- needs wait_until for C* convergence
+        helpers.wait_until(function()
+          local admin_client = helpers.admin_client()
+
+          res = assert(admin_client:get("/clustering/data-planes"))
+          local body = assert.res_status(200, res)
+
+          admin_client:close()
+          local json = cjson.decode(body)
+
+          for _, v in pairs(json.data) do
+            if v.id == uuid then
+              assert.equal(version, v.version)
+              return true
+            end
+          end
+        end, 5)
+      end)
+    end)
+
+    describe("cluster_version_check = major_minor, bugfix and suffix can be different", function()
+      lazy_setup(function()
+        helpers.get_db_utils(strategy, {
+          "routes",
+          "services",
+          "clustering_data_planes",
+        }) -- runs migrations
+
+        assert(helpers.start_kong({
+          role = "control_plane",
+          cluster_cert = "spec/fixtures/kong_clustering.crt",
+          cluster_cert_key = "spec/fixtures/kong_clustering.key",
+          lua_ssl_trusted_certificate = "spec/fixtures/kong_clustering.crt",
+          database = strategy,
+          db_update_frequency = 3,
+          cluster_listen = "127.0.0.1:9005",
+          nginx_conf = "spec/fixtures/custom_nginx.template",
+          cluster_version_check = "major_minor",
+        }))
+      end)
+
+      lazy_teardown(function()
+        helpers.stop_kong()
+      end)
+
+      it("CP and DP version matches", function()
+        local uuid = utils.uuid()
+
+        local res = assert(helpers.clustering_client({
+          host = "127.0.0.1",
+          port = 9005,
+          cert = "spec/fixtures/kong_clustering.crt",
+          cert_key = "spec/fixtures/kong_clustering.key",
+          node_id = uuid,
+        }))
+
+        assert.equals("reconfigure", res.type)
+        assert.is_table(res.config_table)
+
+        -- needs wait_until for C* convergence
+        helpers.wait_until(function()
+          local admin_client = helpers.admin_client()
+
+          res = assert(admin_client:get("/clustering/data-planes"))
+          local body = assert.res_status(200, res)
+
+          admin_client:close()
+          local json = cjson.decode(body)
+
+          for _, v in pairs(json.data) do
+            if v.id == uuid then
+              assert.equal(tostring(_VERSION_TABLE), v.version)
+              return true
+            end
+          end
+        end, 5)
+      end)
+
+      it("CP and DP minor version mismatches, sync is still allowed", function()
+        local uuid = utils.uuid()
+        local version = string.format("%d.%d.%d", MAJOR, MINOR, PATCH + 1)
+
+        local res = assert(helpers.clustering_client({
+          host = "127.0.0.1",
+          port = 9005,
+          cert = "spec/fixtures/kong_clustering.crt",
+          cert_key = "spec/fixtures/kong_clustering.key",
+          node_version = version,
+          node_id = uuid,
+        }))
+
+        assert.equals("reconfigure", res.type)
+        assert.is_table(res.config_table)
+
+        -- needs wait_until for C* convergence
+        helpers.wait_until(function()
+          local admin_client = helpers.admin_client()
+
+          res = assert(admin_client:get("/clustering/data-planes"))
+          local body = assert.res_status(200, res)
+
+          admin_client:close()
+          local json = cjson.decode(body)
+
+          for _, v in pairs(json.data) do
+            if v.id == uuid then
+              assert.equal(version, v.version)
+              return true
+            end
+          end
+        end, 5)
+      end)
+
+      it("CP and DP suffix mismatches, sync is still allowed", function()
+        local uuid = utils.uuid()
+        local version = tostring(_VERSION_TABLE) .. "-enterprise-version"
+
+        local res = assert(helpers.clustering_client({
+          host = "127.0.0.1",
+          port = 9005,
+          cert = "spec/fixtures/kong_clustering.crt",
+          cert_key = "spec/fixtures/kong_clustering.key",
+          node_version = version,
+          node_id = uuid,
+        }))
+
+        assert.equals("reconfigure", res.type)
+        assert.is_table(res.config_table)
+
+        -- needs wait_until for C* convergence
+        helpers.wait_until(function()
+          local admin_client = helpers.admin_client()
+
+          res = assert(admin_client:get("/clustering/data-planes"))
+          local body = assert.res_status(200, res)
+
+          admin_client:close()
+          local json = cjson.decode(body)
+
+          for _, v in pairs(json.data) do
+            if v.id == uuid then
+              assert.equal(version, v.version)
+              return true
+            end
+          end
+        end, 5)
+      end)
+    end)
+  end)
 
   describe("CP/DP sync works with #" .. strategy .. " backend", function()
     lazy_setup(function()

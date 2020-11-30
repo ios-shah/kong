@@ -15,6 +15,14 @@ return {
 
       INSERT INTO parameters (key, value) VALUES('cluster_id', '%s')
       ON CONFLICT DO NOTHING;
+
+      DO $$
+      BEGIN
+        ALTER TABLE IF EXISTS ONLY "clustering_data_planes" ADD "version" TEXT;
+      EXCEPTION WHEN DUPLICATE_COLUMN THEN
+        -- Do nothing, accept existing state
+      END;
+      $$;
     ]], CLUSTER_ID),
   },
   cassandra = {
@@ -28,6 +36,8 @@ return {
 
       INSERT INTO parameters (key, value) VALUES('cluster_id', '%s')
       IF NOT EXISTS;
+
+      ALTER TABLE clustering_data_planes ADD version text;
     ]], CLUSTER_ID),
   }
 }

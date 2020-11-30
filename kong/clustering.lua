@@ -35,6 +35,7 @@ local inflate_gzip = utils.inflate_gzip
 local deflate_gzip = utils.deflate_gzip
 
 
+local KONG_VERSION = require("kong.meta")._VERSION
 local MAX_PAYLOAD = 4 * 1024 * 1024 -- 4MB
 local PING_INTERVAL = 30 -- 30 seconds
 local PING_WAIT = PING_INTERVAL * 1.5
@@ -137,7 +138,9 @@ local function communicate(premature, conf)
 
   local c = assert(ws_client:new(WS_OPTS))
   local uri = "wss://" .. address .. "/v1/outlet?node_id=" ..
-              kong.node.get_id() .. "&node_hostname=" .. utils.get_hostname()
+              kong.node.get_id() ..
+              "&node_hostname=" .. utils.get_hostname() ..
+              "&node_version=" .. KONG_VERSION
 
   local opts = {
     ssl_verify = true,
@@ -312,6 +315,23 @@ local function validate_shared_cert()
 end
 
 
+local MAJOR_MINOR_PATTERN = "^(%d+%.%d+)%.%d+"
+local function should_send_config_update(cp_version, node_version)
+  local cluster_version_check = kong.configuration.cluster_version_check
+  if cluster_version_check == "exact" then
+    return cp_version == node_version
+  end
+
+  if cluster_version_check == "major_minor" then
+    local minor_cp = cp_version:match(MAJOR_MINOR_PATTERN)
+    local minor_node = node_version:match(MAJOR_MINOR_PATTERN)
+    return minor_cp == minor_node
+  end
+
+  error("unexpected cluster_version_check: " .. tostring(cluster_version_check))
+end
+
+
 function _M.handle_cp_websocket()
   -- use mutual TLS authentication
   if kong.configuration.cluster_mtls == "shared" then
@@ -325,6 +345,7 @@ function _M.handle_cp_websocket()
 
   local node_hostname = ngx_var.arg_node_hostname
   local node_ip = ngx_var.remote_addr
+  local node_version = ngx_var.arg_node_version
 
   local wb, err = ws_server:new(WS_OPTS)
   if not wb then
@@ -349,7 +370,7 @@ function _M.handle_cp_websocket()
 
   clients[wb] = queue
 
-  do
+  if should_send_config_update(KONG_VERSION, node_version) then
     local config_table
     -- unconditionally send config update to new clients to
     -- ensure they have latest version running
@@ -426,6 +447,7 @@ function _M.handle_cp_websocket()
           config_hash = data ~= "" and data or nil,
           hostname = node_hostname,
           ip = node_ip,
+          version = node_version,
         }, { ttl = kong.configuration.cluster_data_plane_purge_delay, })
         if not ok then
           ngx_log(ngx_ERR, "unable to update clustering data plane status: ", err)
@@ -459,7 +481,8 @@ function _M.handle_cp_websocket()
             ngx_log(ngx_DEBUG, "sent PONG packet to data plane")
           end
 
-        else -- config update
+        elseif should_send_config_update(KONG_VERSION, node_version) then
+          -- config update
           local _, err = wb:send_binary(payload)
           if err then
             if not is_timeout(err) then
@@ -471,6 +494,13 @@ function _M.handle_cp_websocket()
           else
             ngx_log(ngx_DEBUG, "sent config update to node")
           end
+
+        else -- incompatible version
+          ngx_log(ngx_WARN, "unable to send updated configuration to " ..
+                            "DP node with hostname = " .. node_hostname ..
+                            " ip = " .. node_ip ..
+                            " node version = " .. node_version ..
+                            " our version = " ..  KONG_VERSION)
         end
 
       elseif err ~= "timeout" then

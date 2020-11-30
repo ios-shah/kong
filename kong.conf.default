@@ -223,6 +223,27 @@
                                  # Required if `cluster_mtls` is set to `pki`,
                                  # ignored otherwise.
 
+#cluster_version_check = strict  # Behavior of Hybrid Mode sync when version
+                                 # mismatch between CP/DP exists.
+                                 #
+                                 # Valid values to this setting are:
+                                 #
+                                 # - `strict`: the version between CP/DP must
+                                 # match *exactly*. That means all component
+                                 # of the version string must be exactly the
+                                 # same or CP will not push out config to DP.
+                                 # This match also checks for version suffix
+                                 # matches such as "rc.1`.
+                                 # - `minor_only`: the major and minor portion
+                                 # of the version number must be the same for
+                                 # or CP will not push out config to DP. This
+                                 # match is a bit relaxed as it allows minor
+                                 # version and version suffix to differ as long
+                                 # as the major and minor portion matches. For
+                                 # example, a CP running in `1.2.0` under this
+                                 # mode will sync config to DP running in
+                                 # version `1.2.1` and `1.2.0-rc.1`.
+
 #------------------------------------------------------------------------------
 # HYBRID MODE DATA PLANE
 #------------------------------------------------------------------------------

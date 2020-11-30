@@ -26,6 +26,7 @@ cluster_mtls = shared
 cluster_ca_cert = NONE
 cluster_server_name = NONE
 cluster_data_plane_purge_delay = 1209600
+cluster_version_check = exact
 mem_cache_size = 128m
 ssl_cert = NONE
 ssl_cert_key = NONE
